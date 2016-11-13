@@ -1,59 +1,59 @@
 import numpy as np, pandas as pd
+np.random.seed = 7
+
 from processing import generateinput
-from keras.models import Sequential
+from keras.models import Sequential, load_model, model_from_json
 from keras.layers.recurrent import LSTM
 from keras.layers.core import Dense, Activation, Dropout
-from keras.models import load_model
-from keras.callbacks import EarlyStopping, ModelCheckpoint
 
-# ---------------
-# HYPER PARAMETERS
-# ---------------
+def makemodel(
+    batchsize=0, window=0, numcols=0, pricelevels=0, dropout=0, 
+    savedweights=None, savedmodel=None):
 
-numcols, pricelevels, window, step = 48, 51, 20, 4
-epochsize = 131072
-epochs = 4
-batchsize = 256
+    if savedmodel is not None or savedweights is not None:
+        json_file = open('model.json','r')
+        model_json = json_file.read()
+        model = model_from_json(model_json)
+        json_file.close()
+        model.load_weights(savedweights)
+        # model = load_model(savedmodel)
+        model.reset_states()
+        model.compile(loss='categorical_crossentropy', optimizer='adam')
+        print 'Loaded model from disk'
+        return model
 
-# -----------
-# THE MODEL
-# -----------
+    print 'Loading model...'
+    model = Sequential()
+    model.add(LSTM(512,
+        return_sequences=True,
+        batch_input_shape=(batchsize, window, numcols),
+        stateful=True))
+    model.add(Dropout(dropout))
+    model.add(LSTM(256, return_sequences=True, stateful=True))
+    model.add(Dropout(dropout))
+    # model.add(LSTM(256, return_sequences=True, stateful=True))
+    # model.add(Dropout(dropout))
+    model.add(LSTM(256, return_sequences=False, stateful=True))
+    model.add(Dropout(dropout))
+    model.add(Dense(pricelevels))
+    model.add(Activation('softmax'))
 
-# model = load_model('model.h5')
-# model.reset_states()
+    # load the weights
+    if not savedweights is None:
+        model.load_weights(savedweights)
+    model.compile(loss='categorical_crossentropy', optimizer='adam')
+    print '--DONE'
+    return model
 
-model = Sequential()
-model.add(LSTM(32, 
-    return_sequences=True, 
-    batch_input_shape=(batchsize, window, numcols), 
-    stateful=True))
-model.add(Dropout(0.20))
-# model.add(LSTM(512, return_sequences=True, stateful=True))
-# model.add(Dropout(0.2))
-# model.add(LSTM(256, return_sequences=True, stateful=True))
-# model.add(Dropout(0.2))
-model.add(LSTM(32, return_sequences=False, stateful=True))
-model.add(Dropout(0.20))
-model.add(Dense(pricelevels))
-model.add(Activation('softmax'))
-# model.load_weights('weights.best.hdf5')
-model.compile(loss='categorical_crossentropy', optimizer='rmsprop')
 
-filepath = "weights.best.hdf5" # "weights-improvement-{epoch:02d}-{val_loss:.2f}.hdf5"
-checkpoint = ModelCheckpoint(filepath, verbose=1, save_best_only=True)
-es = EarlyStopping(monitor='val_loss', patience=2)
-gen = generateinput(numrows=batchsize*4)
-valgen = generateinput(initialdate='1103', numrows=batchsize*4)
+# class ResetStatesCallback(Callback):
+#     def __init__(self):
+#         self.counter = 0
 
-# for i in range(epochs):
-#     print 'Epoch', i
-model.fit_generator(gen, 
-    samples_per_epoch=epochsize, 
-    nb_epoch=epochs,
-    validation_data=valgen,
-    nb_val_samples=32,
-    callbacks=[checkpoint, es],
-    )
-
-# model.reset_states()
-# model.save('model.h5')
+#     def on_batch_begin(self, batch, logs={}):
+#         pass
+        # batch is the batch number
+        # print batch
+        # if self.counter % max_len == 0:
+        #     self.model.reset_states()
+        # self.counter += 1

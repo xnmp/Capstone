@@ -4,97 +4,19 @@ import numpy as np, pandas as pd
 from datetime import datetime as dt, timedelta, time, date
 from itertools import product
 from os import walk
+from aux import *
+from bisect import bisect_left
 
-# # rearrange folders
-# import os
-# for fpath in datasets:
-#     fpathl = fpath.split('/')
-#     ticker = fpathl[1]
-#     ddate = fpathl[2].partition('_')[0]
-#     dtype = fpathl[2].partition('_')[2].partition('.')[0]
-#     if not os.path.exists('Datasets/' + ddate):
-# 	    os.makedirs('Datasets/' + ddate)
-#     os.rename(fpath, '{}/{}/{}_{}.csv'.format(fpathl[0], ddate, ticker, dtype))
+# -----------
+# AGGREGATE THE DATA
+# -----------
 
-def getdata(dtype, symb, date):
-
-    url0, url1, url2, url3 = 'http://hopey.netfonds.no/', 'dump.php?date=2016', '&paper=', '.N&csv_format=csv'
-
-    #     read the files
-    url = url0 + dtype + url1 + date + url2 + symb + url3
-    df = requests.get(url).content
-    df = pd.read_csv(io.StringIO(df.decode('utf-8')))
-
-    #     do some cleaning
-    df['time'] = pd.to_datetime(df['time'])
-    if dtype == 'pos':
-        df = df.drop(['bid_depth_total','offer_depth_total'], axis=1)
-        df.columns = ['time', 'bid_price', 'bid_qty', 'offer_price', 'offer_qty']
-    elif dtype == 'trade':
-        df = df.drop(['source','buyer','seller','initiator'], axis=1)
-        df.columns = ['time', 'trade_price', 'trade_qty']
-
-    #     stop if the dataset doesn't exist
-    # maxtime = int(df['time'].apply(lambda x: x.hour).max())
-    # if maxtime < 22:
-    # 	# don't export if the maxtime doesn't exist
-    #     return df
-
-    #     export the file
-    if not os.path.exists('Datasets/' + date):
-        os.makedirs('Datasets/' + date)
-        print "Made Directory", date
-    df.to_csv('Datasets/' + date + '/' + symb + '_' + dtype + '.csv', index=False)
-
-    return df
-
-def getinddata(ind='Major Banks', currentdate=dt.date(dt.today()), window=3):
-
-	cdate = currentdate#dt.date(2016, currentdate[:2], currentdate[2:])
-
-	tickers = gettickers()
-
-	sect_tickers = tickers.reset_index().groupby('Sector')['Symbol'].agg(lambda x: list(x))
-	ind_tickers = tickers.reset_index().groupby('Industry')['Symbol'].agg(lambda x: list(x))
-
-	iterdates = [str((cdate-timedelta(days=i)).month).zfill(2) + str((cdate-timedelta(days=i)).day).zfill(2) for i in range(1, window+1)]
-	print iterdates
-	for date in iterdates: # or tickers.index for all industries
-		print "DATE:", date
-		for symb, dtype in product(ind_tickers[ind], ('pos','trade')):
-			if symb == 'BLW':
-				continue
-			print symb
-			try:
-			    getdata(dtype, symb, date)
-			except UnicodeDecodeError:
-			    print '--NOT FOUND'
-			    continue
-
-def gettickers():
-    tickers = pd.read_csv('Datasets/companylist.csv')
-    tickers = tickers.set_index('Symbol')[['Name','Industry','Sector','MarketCap']]
-    tickers = tickers[(tickers.MarketCap > 10**8) & (tickers.Sector != 'n/a')]
-    return tickers
-
-#this contains raw data, plus the ticker
 def readdata(fpath):
+    # this contains raw data, plus the ticker
     hh = pd.read_csv(fpath)
     hh['ticker'] = fpath.split('/')[2].partition('_')[0]
     hh['time'] = hh['time'].apply(lambda x: dt.strptime(x, '%Y-%m-%d %H:%M:%S'))
     return hh
-
-def subtimes(t1,t2):
-    return dt.combine(date.min, t1) - dt.combine(dt.min, t2)
-
-def timefromhrs(x):
-    minutes = x % 1 * 60.0
-    seconds = minutes % 1 * 60
-    return time(int(x // 1), int(minutes // 1), int(seconds // 1))
-
-def incrementdate(d, delta=1): #d is a string
-    newdate = date(2016, int(d[:2]), int(d[2:])) + timedelta(days=delta)
-    return str.zfill(str(newdate.month), 2) + str.zfill(str(newdate.day), 2)
 
 def dummytrades(df, tradeprop=0.1, vari=2):
     numtrades = len(df)
@@ -121,91 +43,100 @@ def dummytrades(df, tradeprop=0.1, vari=2):
     df['type'] = 1
     return df
 
-def aggalldata():
+def aggalldata(target=None):
     walkfiles = sorted(walk('Datasets/'))
     for i, (dirpath, dirnames, filenames) in enumerate(walkfiles):
         if dirnames != []:
             for dirn in sorted(dirnames):
                 print dirn.split('/')[-1]
-                aggdata(dirn.split('/')[-1])
+                aggdata(dirn.split('/')[-1], target=target)
             break
 
-def aggdata(cdate):
+def aggdata(cdate, target=None):
 
-#   read all the data from the specified date, and the date before and after it
+    #   read all the data from the specified date, and the date before and after it
     hh = pd.DataFrame()
     folders = [f for f in sorted(os.listdir('Datasets/')) if '.csv' not in f]
     order = folders.index(cdate)
     firstday, lastday = False, False
-    for i in [j for j in [order-1,order,order+1] if j >= 0]:
+    for i in [order-1,order,order+1]:
+        # first and last days
         if i >= len(folders):
+            lastday = True
             break
-        ddate = folders[i]
-        # print ddate
-        if not os.path.exists('Datasets/' + ddate):
-            if i == order - 1:
-                firstday = True
-            else:
-                lastday = True
-            print 'No such directory:', 'Datasets/' + ddate
-            # print os.listdir('Datasets/' + ddate)
+        if i < 0:
+            firstday = True
             continue
-        
-        for fi in [f for f in os.listdir('Datasets/' + ddate) if f[-3:] == 'csv' and f != 'all.csv']:
+            
+        ddate = folders[i]
+        for fi in [f for f in os.listdir('Datasets/' + ddate) if f[-3:] == 'csv' and 'all' not in f]:
+            # if target is not none, keep only the target
+            if target is not None and target not in fi:
+                continue
             fpath = 'Datasets/{}/{}'.format(ddate, fi)
             fd = readdata(fpath)
     #       add random dummy trades
             if 'trade' in fi:
-                try:
-                    fd = dummytrades(fd)
-                except:
-                    print fd
-                    raise TypeError
+                fd = dummytrades(fd)
             hh = pd.concat([hh, fd], ignore_index=True)
 
-#   days until next 
-#   1 except for last day of week, 3 for fridays, 4 for long weekends etc
-    if not lastday:
-        nextdate = hh['time'].iloc[-1].date()
-        hh['daysnext'] = hh['time'].apply(lambda x: (nextdate - x.date()).total_seconds()/86400)
-    else:
-        hh['daysnext'] = None
-
-#   create a flag for trade or order
-    hh.loc[np.isnan(hh['type']),['type']] = 0
-    hh['type'] = hh['type'].astype(np.bool)
-
-#   integrate trades and orders, fillna
+    # integrate trades and orders, fillna
     hh = hh.sort_values(['ticker','time','type'])
     hh[['bid_price', 'bid_qty', 'offer_price', 'offer_qty']] = hh[['bid_price', 'bid_qty', 'offer_price', 'offer_qty']].fillna(method='ffill')
     hh['trade_price'] = hh['trade_price'].fillna((hh['bid_price'] + hh['offer_price'])/2)
     hh['trade_qty'] = hh['trade_qty'].fillna(0)
+
+    # create a flag for trade or order
+    hh.loc[np.isnan(hh['type']),['type']] = False
+    hh['type'] = hh['type'].astype(np.bool)
+
+    # if there are orders appearing in the same second as trades, remove the orders
+    hh['truetrade'] = hh['type'] & (hh['trade_qty']!=0)
+    nt = pd.DataFrame(hh.groupby('time').truetrade.nunique().rename('counttypes'))
+    hh = hh.merge(nt, left_on='time', right_index=True)
+    hh = hh[(hh['counttypes']!=2) | (hh['truetrade'])]
+    hh = hh.drop(['counttypes','truetrade'], axis=1)
+
+    # inverse weighted midpoint
+    hh['inv_weighted_midpoint'] = hh['bid_price'] * hh['offer_qty'] + hh['offer_price'] * hh['bid_qty']
+    hh['inv_weighted_d'] = hh['inv_weighted_midpoint'] - hh['midpoint']
+
+    # days until next: 1 usually, 3 for fridays, 4 for long weekends etc
+    hh = hh.rename(columns={'time':'datetime'})
+    nextdate = hh['datetime'].iloc[-1].date()
+    f = lambda x: (nextdate - x.date()).total_seconds() / 86400
+    daysnext = hh['datetime'].apply(f)
+
+    # normalize times, omit the date
+    firsttrade = hh[(hh['type']) & (hh['trade_qty']!=0)]['datetime'].min().time()
+    hh['date'] = hh['datetime'].apply(lambda x: x.date())
+    hh['time'] = hh['datetime'].apply(lambda x: subtimes(x.time(), firsttrade).total_seconds() / 234)
     
+    # time until market open
+    hh['timeopen'] = np.where((hh['time'] < 0), -hh['time'], 0)
+    hh['timeopen'] = np.where((hh['time'] > 100), 369.23 * daysnext - hh['time'], hh['timeopen'])
+    if lastday:
+        hh[hh['timeopen'] > 100] = 0
+
     # time since the last observation
-    hh = hh.sort_values('time')
-    hh['time_since_last'] = (hh['time'] - hh['time'].shift()).apply(lambda x: x.total_seconds()) / 234
-    # fill in the first "time since last"
-    if firstday:
-        hh.iloc[0,10] = hh.iloc[0,4] - 102 + 86400 / 234
+    hh = hh.sort_values(['date','time'])
+    hh['time_since_last'] = (hh['datetime'] - hh['datetime'].shift()).apply(lambda x: x.total_seconds() / 234)
 
     # add predictions
     hh = addtargets(hh)
 
     # just keep the dates that are of concern
-    hh = hh[hh['time'].apply(lambda x: x.date()) == date(2016, int(cdate[:2]), int(cdate[2:]))]
+    hh = hh[hh['date'] == date(2016, int(cdate[:2]), int(cdate[2:]))]
+    
+    # fill in the first "time since last"
+    if firstday:
+        hh.loc[hh.index[0],'time_since_last'] = hh['time'].iloc[0] - 102 + 86400 / 234
 
-    # normalize times, omit the date
-    try:
-        firsttrade = hh[(hh['type']) & (hh['trade_qty']!=0)]['time'].min().time()
-    except:
-        print 'ERROR'
-        hh.to_csv('Datasets/aaaa.csv')
-        raise TypeError
-    # hh['date'] = hh['time'].apply(lambda x: (x.date() - date(2016,10,4)).total_seconds() / 86400)
-    hh['time'] = hh['time'].apply(lambda x: subtimes(x.time(), firsttrade).total_seconds() / 234)
-
-#   export
-    hh.to_csv('Datasets/' + cdate + '/all.csv', index=False)
+    # export
+    if target is None:
+        hh.to_csv('Datasets/' + cdate + '/all.csv', index=False)
+    else:
+        hh.to_csv('Datasets/{}/all_{}.csv'.format(cdate, target), index=False)
 
 def addtargets(df, target='JPM', ticksize=0.01, lookahead=0, type1='trade', type2='price'):
     # type1 = trade, bid, offer
@@ -218,153 +149,151 @@ def addtargets(df, target='JPM', ticksize=0.01, lookahead=0, type1='trade', type
     df.loc[dft,'midpoint'] = (df.loc[dft,'bid_price'] + df.loc[dft,'offer_price']) / 2
     df.loc[:,'midpoint'] = df['midpoint'].ffill()
 
-#---THE PREDICTION
+    # transform to midpoint and spread for orders, distance from midpoint for trades
+    df['midpoint_change'] = df['midpoint'] - df['midpoint'].shift()
+    df['spread'] = df['offer_price'] - df['bid_price']
+    df['oddeven'] = (df['spread'] / ticksize).apply(round) % 2
+    # df['spread_change'] = df['spread'] - df['spread'].shift()
+    df['trade_price_d'] = df['trade_price'] - df['midpoint']
+    # normalize quantities
+    df['bid_qty'] = df['bid_qty'] / 1000
+    df['offer_qty'] = df['offer_qty'] / 1000
+    df['trade_qty'] = df['trade_qty'] / 1000
+
+#---ADD THE PREDICTION TARGETS
     # real trades are where the prediction trade_qty is not zero
-    if type2 == 'trade':
+    if type1 == 'trade':
         nextpredcond = (df[dft]['trade_qty'].shift(-1) != 0)
     # real order book updates are different from their previous ones
     else:
         nextpredcond = ((df[dft]['bid_qty'] != df[dft]['bid_qty'].shift(-1)) & (df[dft]['offer_qty'] != df[dft]['offer_qty'].shift(-1)))
     nextpred = df[dft][type1 + '_' + type2].shift(-1)
     
-#   fill it in
+    #   fill it in
     df.loc[dft,pred] = np.where(nextpredcond, nextpred, np.nan)
     df.loc[:,pred] = df[pred].bfill()
     df['target'] = (df[pred] - df['midpoint']).apply(lambda x: round2(x, ticksize / 2))
-    df.drop([pred,'midpoint'], axis=1, inplace=True)
+
+    # import matplotlib.pyplot as plt
+    # bins = np.linspace(-0.04, 0.04, 18)
+    # plt.hist(df[df['oddeven']==1]['target'].dropna(), bins)
+    # plt.show()
     return df
 
-def tickerdummies(cdate, tickers = [u'BAC', u'BBD', u'BBT', u'BK', u'BNS', u'BOH', u'BXS', u'C', u'CBU',
-       u'CFR', u'CMA', u'COF', u'CPF', u'DB', u'FBP', u'FCF', u'FSB', u'HTH',
-       u'ITUB', u'JPM', u'KEY', u'MFG', u'MTB', u'OFG', u'PB', u'PNC', u'RF',
-       u'SCNB', u'SHG', u'SNV', u'STI', u'STL', u'STT', u'TCB', u'UBS', u'USB',
-       u'VLY', u'WFC'],
-       outside=0):
-    df = pd.read_csv('Datasets/{}/all.csv'.format(cdate))
-    df = pd.concat([df, pd.get_dummies(df['ticker']).astype(np.bool)], axis=1)
-    for ticker in tickers:
-        if ticker not in df.columns:
-            # print 'KKKK', df.columns
-            df[ticker] = False
-            # print df.iloc[1,:]
-    # print df.columns, sorted(df.columns)
-    df = df.reindex_axis(sorted(df.columns), axis=1)
-    # remove everything outside of 4 minutes of market open and close
-    df = df[(df['time'] < 100 * (1 + outside)) & (df['time'] > (-outside))]
-    df['time'].iloc[0] = 267.23
-    # df.set_value(0,'time',267.23)
-    return df
+# ---------------------------
+# PREPARE AGGREGATED DATA FOR MODEL
+# ---------------------------
 
-def generateinput(target='JPM', 
-                 initialdate='1004', 
-                 pricelevels=51,
-                 ticksize=0.01,
-                 window=20, # how far to unroll, how far we BPTT
-                 numrows=256*4, # how many timesteps from the original dataframe we need
-                 step=4, # how many timesteps each successive input is
-                        # for example if window=3 and step=2 then [1,2,3,4,5] gets unrolled into [1,2,3], [3,4,5]
-                 outside=0, # whether to include observations outside of market hours
-                 crow=0):
-    
+def generateinput(
+    target='JPM', initialdate='1004', 
+    pricelevels=51,
+    ticksize=0.01,
+    window=32, # how far to unroll, how far we BPTT
+    numrows=512, # how many timesteps from the original dataframe we need
+    step=1, # how many timesteps each successive input is
+        # for example if window=3 and step=2 then [1,2,3,4,5] gets unrolled into [1,2,3], [3,4,5]
+    outside=0, # whether to include observations outside of market hours
+    crow=0,
+    model=None, # have access to the model from inside the generator
+    cols=['time','midpoint_change','spread','oddeven',
+            'trade_price_d','bid_qty','offer_qty','trade_qty',
+            'type','timeopen','time_since_last']
+    ):
+
     cdate = initialdate
-    cfile = tickerdummies(cdate, outside=outside)
-    # print cfile.shape
-    
-#   build the dataset
+    cfile = preparedata(cdate, outside=outside)
+    # build the dataset
     while True:
+        # we first get 10% more than we need, and throw away the extras later
+        rowuntil = crow + numrows + window
+        df = cfile.iloc[crow:rowuntil, :].copy()
+        crow += numrows
         l = len(cfile)
-#       we first get 10% more than we need, and throw away the extras later
-        rowuntil = crow + int(numrows * 1.1)
-        df = cfile.iloc[crow:rowuntil, :]
-#       if the current dataset doesn't contain enough data
+        # if the current dataset doesn't contain enough data
         if rowuntil > l:
             rowsleft = rowuntil - l
-            cdate = incrementdate(cdate, outside=outside)
-            # open the next file
-            try:
-                cfile = tickerdummies(cdate, outside=outside)
-            except:
-#               restart the loop
-                cdate, crow = initialdate, 0
-                cfile = tickerdummies(cdate)
-                continue
-            df = pd.concat([df, cfile.iloc[:rowsleft]])
+            cdate = incrementdate(cdate)
+            # cfile = pd.concat([cfile.iloc[crow:], preparedata(cdate, outside=outside)])
+            cfile = preparedata(cdate, outside=outside)
+            newstart = max(l - crow, 0)
+            crow = 0
 
-#       ticker as a one-hot encoding
-        # df = pd.concat([df, pd.get_dummies(df['ticker']).astype(np.bool)], axis=1)
-        # print df.columns
-        # remove empty predictions and trim the dataset
-        df = df[~np.isnan(df['target'])].iloc[:numrows + window]
-        # print df.shape
-        crow = df.index.max()
+            # reset the state when we return to the beginning
+            if cdate == '1004':
+                print 'GenerateInput: Restarting from the beginning'
+                # reset the states
+                if model is not None:
+                    model.reset_states()
+                    print model.summary()
+
+            # pad the dataframe
+            paddf = np.empty((rowsleft, len(df.columns)))
+            paddf[:] = np.nan
+            df = pd.concat([df, pd.DataFrame(paddf, columns=df.columns)])
+            df['trade_qty'] = df['trade_qty'].fillna(0)
+            df['midpoint_change'] = df['midpoint_change'].fillna(0)
+            df['time_since_last'] = df['time_since_last'].fillna(0)
+            df['timeopen'] = df['timeopen'].fillna(239.23)
+            df['type'] = df['type'].fillna(False).astype(np.bool)
+            df = df.fillna(method='ffill')
+            
+            # append part of the next dataset
+            # print crow, l, rowuntil, rowsleft, newstart
+            # df = pd.concat([df, cfile.iloc[newstart: newstart + rowsleft]])
+
+        # change the midpoint for files between files
+        f = df.loc[df.index[0],'midpoint_change']
+        df['midpoint_change'] = df['midpoint'] - df['midpoint'].shift()
+        df.loc[df.index[0],'midpoint_change'] = f
+
+        # trim the dataset
+        df = df.iloc[:numrows + window]
 
         # convert to numpy array
         targets = np.array(df['target'])
-        # print df.shape, df.iloc[0,:]
-        df = np.array(df.drop(['ticker','target','midpoint','next_trade_price'], axis=1))
+        df = np.array(df[cols])
+        # drop(['next_trade_price','bid_price','offer_price'], axis=1)
 
-#       THE DATA: note that we use zeros to set aside the memory at the outset
+        # THE DATA: note that we use zeros to set aside the memory at the outset
         X = np.zeros((numrows / step, window, len(df[0])))
         for i in range(0, numrows / step):
             X[i] = df[i*step:i*step + window, :]
-#       puts the targets into bins
+        # puts the targets into bins
         y = makeprob(targets, numrows / step, pricelevels, ticksize, step, window)
-        # print X.shape[0], crow
         yield X, y
 
-def round2(number,roundto):
-    return (round(number / roundto) * roundto)
+def getdummies(df):
+    df = pd.concat([df, pd.get_dummies(df['ticker']).astype(np.bool)], axis=1)
+    for ticker in tickers:
+        if ticker not in df.columns:
+            df[ticker] = False
+    # sort the columns alphabetically
+    return df.reindex_axis(sorted(df.columns), axis=1)
 
-def genbins(pricelevels, ticksize, exponent=0.35):
-#   this is how we do it:
-#   40% of the bins are one halftick
-#   24% are two halfticks, 15% are 3, 9% are 4, 6% are 5, it's about *3/5 each time
-    lleft, htick = (pricelevels - 1) / 2, ticksize / 2
-    temp, cnum = lleft, htick
-    multiplier, i, j = 1, 1, 1
-    yield 0
-    while i <= temp:
-        if j > lleft * exponent:
-            lleft -= j
-            multiplier += 1
-            j = 0
-        yield cnum
-        yield -cnum
-        cnum += htick * multiplier
-        j += 1
-        i += 1
-
-from bisect import bisect_left
-
-def takeClosest(myList, myNumber):
-#     Assumes myList is sorted. Returns closest value to myNumber.
-#     If two numbers are equally close, return the smallest number.
-#     Credit goes to http://stackoverflow.com/questions/12141150/from-list-of-integers-get-number-closest-to-a-given-value/12141511#12141511
-    pos = bisect_left(myList, myNumber)
-    if pos == 0:
-        return myList[0]
-    if pos == len(myList):
-        return myList[-1]
-    before = myList[pos - 1]
-    after = myList[pos]
-    if after - myNumber < myNumber - before:
-        return after
+def preparedata(cdate, tickers = [u'BAC', u'BBD', u'BBT', u'BK', u'BNS', u'BOH', u'BXS', u'C', u'CBU',
+    u'CFR', u'CMA', u'COF', u'CPF', u'DB', u'FBP', u'FCF', u'FSB', u'HTH',
+    u'ITUB', u'JPM', u'KEY', u'MFG', u'MTB', u'OFG', u'PB', u'PNC', u'RF',
+    u'SCNB', u'SHG', u'SNV', u'STI', u'STL', u'STT', u'TCB', u'UBS', u'USB',
+    u'VLY', u'WFC'],
+    outside=0,
+    target='JPM'):
+    
+    if target is None:
+        df = pd.read_csv('Datasets/{}/all.csv'.format(cdate))
     else:
-        return before
-        
-def makeprob(targets, inputlen, pricelevels, ticksize, step, window, tsteps=1):
-    
-    bins = sorted(list(genbins(pricelevels, ticksize)))
-    bindict = {x:i for i, x in enumerate(bins)}
-    htick = ticksize / 2
-    
-    if tsteps > 1:
-        raise NotImplementedError
+        df = pd.read_csv('Datasets/{}/all_{}.csv'.format(cdate, target))
 
-    y = np.zeros((inputlen, pricelevels))
-    for i in range(0, inputlen):
-        y[i, bindict[takeClosest(bins, targets[i*step + window])]] = 1
-    return y
+    # add the dummy variables
+    # df = getdummies(df)
 
-# if __name__ == '__main__':
-# 	getinddata(window=1)
+    # remove everything outside of 4 minutes of market open and close
+    df = df[(df['time'] <= 100 * (1 + outside)) & (df['time'] >= (-outside))]
+    df['time_since_last'].iloc[0] = 267.23
+
+    # clean out observations with no target
+    df = df[~np.isnan(df['target'])]
+
+    # reset index
+    df = df.reset_index(drop=True)
+    print 'GenerateInput: Opening new file:{}, size: {}'.format(cdate, len(df))
+    return df
